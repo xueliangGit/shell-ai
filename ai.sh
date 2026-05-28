@@ -6,9 +6,13 @@
 # 版本定义
 VERSION="1.0.0"
 
-# 补全执行环境 PATH（修复通过软链接独立执行时 eval 找不到系统命令的 127 问题）
-# 将所有常见工具路径（含 Homebrew/macOS/Linux 标准路径）一次性合并注入
-export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/opt/homebrew/opt/coreutils/libexec/gnubin"
+# 修复独立执行时子 Shell PATH 残缺问题（eval 找不到系统命令的根本原因）
+# 方案 1：macOS 使用 path_helper 官方机制完整重建 PATH（与交互式终端完全一致）
+if [ -x /usr/libexec/path_helper ]; then
+    eval "$(/usr/libexec/path_helper -s)"
+fi
+# 方案 2：Linux / 未执行 path_helper 时手动追加所有常见工具路径（Homebrew + 标准系统路径）
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
 
 # 可配置区
 CONF_DIR="$HOME/.shell_ai"
