@@ -1,0 +1,5 @@
+# 忽略本地运行产生的临时配置与缓存日志
+.shell_ai/
+*.log
+*.tmp
+.DS_Store
