@@ -3,16 +3,18 @@
 # ShellAI - 极简、安全且 100% 兼容 source 载入的单次命令查询助手
 # -----------------------------------------------------------------
 
+# 防止重复加载锁
+if [ -n "$SHELL_AI_LOADED" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+SHELL_AI_LOADED=1
+
 # 版本定义
 VERSION="1.0.0"
 
-# 修复独立执行时子 Shell PATH 残缺问题（eval 找不到系统命令的根本原因）
-# 方案 1：macOS 使用 path_helper 官方机制完整重建 PATH（与交互式终端完全一致）
-if [ -x /usr/libexec/path_helper ]; then
-    eval "$(/usr/libexec/path_helper -s)"
-fi
-# 方案 2：Linux / 未执行 path_helper 时手动追加所有常见工具路径（Homebrew + 标准系统路径）
-export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin"
+# [移除硬编码 PATH 注入] 
+# 我们不再手动修改 PATH，而是完全信任并继承调用者（即你的终端会话）的环境变量。
+# 这样可以确保 ai 执行时能 100% 找到你终端里的所有自定义命令（如 git, npm, fnm 等）。
 
 # 可配置区
 CONF_DIR="$HOME/.shell_ai"
@@ -26,6 +28,7 @@ DEFAULT_MODEL="openrouter/owl-alpha"
 DEFAULT_TEMP=0.7
 DEFAULT_MAX_TOKENS=1024
 DEFAULT_AUTO_RUN="false"
+DEFAULT_SILENT_LOAD="false"
 
 # 初始化目录和日志
 init_dir() {
@@ -33,8 +36,8 @@ init_dir() {
     [ -f "$HIST_FILE" ] || touch "$HIST_FILE" || return 1
     [ -f "$DEBUG_FILE" ] || touch "$DEBUG_FILE" || return 1
     
-    # 初始化/校验跨进程会话缓存文件
-    if [ ! -f "$SESSION_FILE" ] || ! jq -e . "$SESSION_FILE" >/dev/null 2>&1; then
+    # 初始化/校验跨进程会话缓存文件 (必须是有效的 JSON 数组)
+    if [ ! -f "$SESSION_FILE" ] || ! jq -e . "$SESSION_FILE" >/dev/null 2>&1 || [ "$(cat "$SESSION_FILE")" = "" ]; then
         echo "[]" > "$SESSION_FILE"
     fi
 }
@@ -42,10 +45,7 @@ init_dir() {
 # 加载配置
 load_config() {
     init_dir || return 1
-    if [ -f "$CONF_FILE" ]; then
-        # shellcheck source=/dev/null
-        source "$CONF_FILE" || return 1
-    else
+    if [ ! -f "$CONF_FILE" ]; then
         # 写入默认配置
         cat > "$CONF_FILE" <<EOF
 OPENROUTER_KEY=""
@@ -54,12 +54,23 @@ MODEL="$DEFAULT_MODEL"
 TEMPERATURE="$DEFAULT_TEMP"
 MAX_TOKENS="$DEFAULT_MAX_TOKENS"
 AUTO_RUN="$DEFAULT_AUTO_RUN"
+SILENT_LOAD="$DEFAULT_SILENT_LOAD"
 LAST_CHECK_TIME="0"
 REMOTE_VERSION_CACHE=""
 EOF
-        # shellcheck source=/dev/null
-        source "$CONF_FILE" || return 1
     fi
+    
+    # 统一 source 配置文件，确保变量进入内存
+    # shellcheck source=/dev/null
+    source "$CONF_FILE" || return 1
+
+    # 兜底逻辑：防止 source 失败或文件内容异常导致变量仍为空
+    BASE_URL="${BASE_URL:-$DEFAULT_BASE_URL}"
+    MODEL="${MODEL:-$DEFAULT_MODEL}"
+    TEMPERATURE="${TEMPERATURE:-$DEFAULT_TEMP}"
+    MAX_TOKENS="${MAX_TOKENS:-$DEFAULT_MAX_TOKENS}"
+    AUTO_RUN="${AUTO_RUN:-$DEFAULT_AUTO_RUN}"
+    SILENT_LOAD="${SILENT_LOAD:-$DEFAULT_SILENT_LOAD}"
 }
 
 # 保存配置
@@ -71,14 +82,21 @@ MODEL="$MODEL"
 TEMPERATURE="$TEMPERATURE"
 MAX_TOKENS="$MAX_TOKENS"
 AUTO_RUN="$AUTO_RUN"
+SILENT_LOAD="${SILENT_LOAD:-false}"
 LAST_CHECK_TIME="${LAST_CHECK_TIME:-0}"
 REMOTE_VERSION_CACHE="${REMOTE_VERSION_CACHE:-}"
 EOF
 }
 
-# 调试日志
+# 调试日志（带自动滚动限制，仅保留最近 1000 行）
 debug() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$DEBUG_FILE"
+    # 自动精简，防止文件无限增长
+    if [ $((RANDOM % 20)) -eq 0 ]; then # 概率触发，减少 IO 损耗
+        local tail_data
+        tail_data=$(tail -n 1000 "$DEBUG_FILE" 2>/dev/null)
+        echo "$tail_data" > "$DEBUG_FILE"
+    fi
 }
 
 # 验证 Key 与 URL
@@ -215,22 +233,31 @@ cmd_install() {
     local bin_dir="$HOME/.local/bin"
     local bin_path="$bin_dir/ai"
     
+    # 动态获取当前脚本的绝对路径，确保安装链接指向真实源文件
+    local script_source
+    if command -v realpath >/dev/null 2>&1; then
+        script_source=$(realpath "$0")
+    else
+        # 兼容旧版 macOS
+        script_source="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    fi
+
     echo "====== 正在配置全局 ShellAI 命令 ======"
+    echo "   源文件路径：$script_source"
     
     [ -d "$bin_dir" ] || mkdir -p "$bin_dir" || return 1
-    chmod +x "$HOME/.ai.sh" || return 1
+    chmod +x "$script_source" || return 1
     
     if [ -L "$bin_path" ] || [ -f "$bin_path" ]; then
         rm -f "$bin_path" || return 1
     fi
     
-    ln -s "$HOME/.ai.sh" "$bin_path" || {
+    ln -s "$script_source" "$bin_path" || {
         echo "❌ 创建软链接失败"
         return 1
     }
     
     echo "✅ 全局部署成功！"
-    echo "   脚本源文件：  $HOME/.ai.sh"
     echo "   全局软链接：  $bin_path"
     
     # 智能载入追加：自动在终端配置文件末尾追加静默载入指令，开启免输自启动！
@@ -244,10 +271,11 @@ cmd_install() {
     fi
     
     if [ -n "$rc_file" ] && [ -f "$rc_file" ]; then
-        if ! grep -q "source ~/.ai.sh" "$rc_file" && ! grep -q "\. ~/\.ai\.sh" "$rc_file"; then
+        # 兼容性检查：同时检查 source 和 . 两种写法，以及对不同源路径的检查
+        if ! grep -q "source $script_source" "$rc_file" && ! grep -q "\. $script_source" "$rc_file"; then
             echo "" >> "$rc_file"
             echo "# ShellAI 自动终端会话初始化载入" >> "$rc_file"
-            echo "[ -f ~/.ai.sh ] && . ~/.ai.sh" >> "$rc_file"
+            echo "[ -f $script_source ] && . $script_source" >> "$rc_file"
             echo "✅ 成功在 $rc_file 中配置自动载入！此后打开任意终端即可直接使用 ai。"
         fi
     fi
@@ -282,23 +310,23 @@ cmd_config() {
         fi
     fi
     
-    printf "1. OpenRouter Key (sk-or-v1-...) [$display_key]: "
+    printf "1. OpenRouter Key (sk-or-v1-...) [%s]: " "$display_key"
     read -r input_key
     OPENROUTER_KEY=${input_key:-$OPENROUTER_KEY}
     
-    printf "2. Base URL [$BASE_URL]: "
+    printf "2. Base URL [%s]: " "$BASE_URL"
     read -r input_url
     BASE_URL=${input_url:-$BASE_URL}
     
-    printf "3. Model ID [$MODEL]: "
+    printf "3. Model ID [%s]: " "$MODEL"
     read -r input_model
     MODEL=${input_model:-$MODEL}
     
-    printf "4. Temperature (0~1) [$TEMPERATURE]: "
+    printf "4. Temperature (0~1) [%s]: " "$TEMPERATURE"
     read -r input_temp
     TEMPERATURE=${input_temp:-$TEMPERATURE}
     
-    printf "5. Max Tokens [$MAX_TOKENS]: "
+    printf "5. Max Tokens [%s]: " "$MAX_TOKENS"
     read -r input_max
     MAX_TOKENS=${input_max:-$MAX_TOKENS}
 
@@ -672,12 +700,15 @@ cmd_run() {
     trap 'kill $loading_pid 2>/dev/null; printf "\r\e[K\e[?25h"' EXIT INT TERM
     
     # 动态组装 messages 数组（注入环境上下文，并保留最近 5 轮多轮对话）
+    local session_data
+    session_data=$(jq -c . "$SESSION_FILE" 2>/dev/null || echo "[]")
+    
     local messages
     messages=$(jq -n \
         --arg sys "$sys_prompt" \
         --arg env "$env_info" \
         --arg content "$prompt" \
-        --argjson history "$(cat "$SESSION_FILE")" \
+        --argjson history "$session_data" \
         '[
             {role: "system", content: ($sys + "\n\n" + $env)}
         ] + $history + [
@@ -705,8 +736,8 @@ cmd_run() {
         -X POST "$BASE_URL/chat/completions" \
         -d "$payload" || true)
 
-    # 请求完毕瞬间，立即消灭转圈子进程，抹去终端转圈痕迹，释放 trap 并完美恢复光标！
-    kill "$loading_pid" 2>/dev/null
+    # 请求完毕瞬间，立即消灭转圈子进程并恢复终端状态
+    [ -n "$loading_pid" ] && kill "$loading_pid" 2>/dev/null
     wait "$loading_pid" 2>/dev/null
     printf "\r\e[K\e[?25h"
     trap - EXIT INT TERM
@@ -716,69 +747,79 @@ cmd_run() {
         return 1
     fi
 
-    debug "请求：$messages"
-    debug "响应：$resp"
+    # 性能保护：如果响应体过大，强制截断
+    if [ ${#resp} -gt 512000 ]; then
+        debug "警告：响应体过大 (${#resp} bytes)，执行强制截断。"
+        resp="${resp:0:512000}"
+    fi
 
-    # 金刚不坏 JSON 清洗：提取区间并强行压平多行物理换行，彻底消除非标控制字符干扰
+    # 深度调试注入：安全转义处理（已压缩空行，防止日志爆炸）
+    local debug_resp
+    debug_resp=$(printf "%s" "$resp" | tr -s '\n' | cat -v | head -n 20)
+    debug "请求完成，原始响应摘要(已压缩空行): \n$debug_resp"
+
+    # 金刚不坏 JSON 清洗：直接抹除首个 { 之前的所有垃圾字符
     local clean_json
-    clean_json=$(echo "$resp" | sed -n '/{/,/}/p' | tr -d '\r' | tr -d '\n' 2>/dev/null || echo "$resp")
+    clean_json=$(printf "%s" "$resp" | sed -n '/{/,$p' | sed '1s/^[^{]*//')
 
     local raw_content=""
-    if echo "$clean_json" | jq -e . >/dev/null 2>&1; then
-        raw_content=$(echo "$clean_json" | jq -r '.choices[0].message.content' 2>/dev/null || true)
+    # 优先尝试标准 JSON 解析
+    if printf "%s" "$clean_json" | jq -e . >/dev/null 2>&1; then
+        raw_content=$(printf "%s" "$clean_json" | jq -r '.choices[0].message.content' 2>/dev/null || true)
     fi
 
     if [ -z "$raw_content" ] || [ "$raw_content" = "null" ]; then
-        echo "❌ 生成失败，原始响应："
-        echo "$resp"
+        echo -e "❌ \033[38;5;196m生成失败：API 返回了非标准或损坏的响应。\033[0m"
+        echo -e "💡 提示：您可以运行 \033[38;5;38mai debug\033[0m 查看原始响应进行排查。"
+        debug "解析失败。清洗后的 JSON 前 100 字符: ${clean_json:0:100}"
         return 1
     fi
 
-    # 使用神级换行替换法，彻底兼容单行粘连与跨多行非标格式的标签提取
-    local flat_content
-    flat_content=$(echo "$raw_content" | tr '\n' '\f' | sed 's/\f/__NL__/g')
-
-    if echo "$flat_content" | grep -q "\[COMMAND\]"; then
-        local flat_cmd
-        flat_cmd=$(echo "$flat_content" | sed -n 's/.*\[COMMAND\]\(.*\)\[ADVICE\].*/\1/p')
-        if [ -z "$flat_cmd" ]; then
-            flat_cmd=$(echo "$flat_content" | sed -n 's/.*\[COMMAND\]\(.*\)/\1/p')
-        fi
-        
-        local flat_advice
-        flat_advice=$(echo "$flat_content" | sed -n 's/.*\[ADVICE\]\(.*\)/\1/p')
-
-        # 还原换行占位符并清洗前后空白
-        raw_cmd=$(echo "$flat_cmd" | sed 's/__NL__/\
-/g' | xargs 2>/dev/null || echo "$flat_cmd")
-        raw_advice=$(echo "$flat_advice" | sed 's/__NL__/\
-/g' | xargs 2>/dev/null || echo "$flat_advice")
+    # --- 终极版：全兼容块提取逻辑 (利用 sed 的区间匹配实现无损提取) ---
+    # 支持 [COMMAND] 和 [ADVICE] 同行、跨行或缺失等极端情况
+    if echo "$raw_content" | grep -q "\[COMMAND\]"; then
+        raw_cmd=$(echo "$raw_content" | sed -n '/\[COMMAND\]/,/\[ADVICE\]/p' | sed 's/.*\[COMMAND\]//; s/\[ADVICE\].*//' | sed '/^[[:space:]]*$/d')
+        raw_advice=$(echo "$raw_content" | sed -n '/\[ADVICE\]/,$p' | sed 's/.*\[ADVICE\]//' | sed '/^[[:space:]]*$/d')
     else
-        # 智能兜底：如果大模型没有输出 [COMMAND] 标签，但内容不长且不含非 ASCII 字符（极大概率是纯 Shell 命令）
-        local line_count
-        line_count=$(echo "$raw_content" | tr -d '\r' | grep -c '^' 2>/dev/null || echo "1")
-        local trimmed
-        trimmed=$(echo "$raw_content" | xargs)
-
-        if [ "$line_count" -le 3 ] && ! LC_ALL=C grep -q '[^ -~]' <<< "$trimmed"; then
+        # 智能兜底：无标签时，若内容精简且为非中文，视为纯命令
+        local line_count=$(echo "$raw_content" | grep -c '^' 2>/dev/null || echo "1")
+        if [ "$line_count" -le 3 ] && ! LC_ALL=C grep -q '[^ -~]' <<< "$raw_content"; then
             raw_cmd="$raw_content"
             raw_advice=""
+        else
+            raw_cmd=""
+            raw_advice="$raw_content"
         fi
     fi
 
-    # 清洁清洗提取出的命令，剔除多余 of markdown 反引号
+    # 清洁清洗：剥离 Markdown 包装，保留核心引号
     local clean_cmd
     clean_cmd=$(echo "$raw_cmd" | sed -E '
         s/^```[a-zA-Z0-9]*[[:space:]]*//g;
         s/```[[:space:]]*$//g;
         s/^`([^`]+)`$/\1/g
-    ' | xargs)
+    ' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '\r')
 
-    local clean_advice
-    clean_advice=$(echo "$raw_advice" | xargs)
+    local clean_advice=$(echo "$raw_advice" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
     # 智能问答/闲聊分析拦截：如果大模型确实按照标记输出了 [COMMAND]，说明是要执行的命令模式
     if [ -n "$clean_cmd" ]; then
+        # 终极安全防线：提取出整行命令的第一个执行字（程序名），验证在系统中是否真实可用
+        local main_cmd
+        main_cmd=$(echo "$clean_cmd" | awk '{print $1}' 2>/dev/null || echo "")
+        if [[ "$main_cmd" == *"="* ]]; then
+            main_cmd=$(echo "$clean_cmd" | awk '{print $2}' 2>/dev/null || echo "")
+        fi
+
+        local cmd_exists=1
+        if [ -n "$main_cmd" ] && ! command -v "$main_cmd" >/dev/null 2>&1; then
+            cmd_exists=0
+        fi
+
+        if [ $cmd_exists -eq 0 ]; then
+            echo -e "⚠️  \033[38;5;196m警报：检测到推荐指令在当前系统不可用（可能拼写错误或未安装）：[$main_cmd]\033[0m"
+        fi
+
         echo -e "✅ \033[38;5;76m推荐指令：\033[0m$clean_cmd"
         if [ -n "$clean_advice" ] && [ "$clean_advice" != "null" ]; then
             echo -e "💡 \033[38;5;244m使用建议：\033[0m$clean_advice"
@@ -824,34 +865,47 @@ cmd_run() {
         else
             # 正常安全命令交互
             if [ "${AUTO_RUN:-false}" = "true" ]; then
-                # 终极安全防线：在自动执行之前，提取出整行命令的第一个执行字（程序名），验证在系统中是否真实可用！
-                # 彻底剿灭任何由于大模型拼写错误（如 rm 打成 m）导致的 127 退出码 and 未知执行隐患
-                local main_cmd
-                main_cmd=$(echo "$clean_cmd" | awk '{print $1}' 2>/dev/null || echo "")
-                if [[ "$main_cmd" == *"="* ]]; then
-                    main_cmd=$(echo "$clean_cmd" | awk '{print $2}' 2>/dev/null || echo "")
-                fi
-
-                if [ -n "$main_cmd" ] && ! command -v "$main_cmd" >/dev/null 2>&1; then
-                    echo -e "❌ \033[38;5;196m错误：检测到大模型生成的命令在当前系统不可用（打错字或未安装）：[$main_cmd]\033[0m"
-                    echo "📋 无法自动运行，请您手动拷贝或修改后核对执行。"
+                if [ $cmd_exists -eq 0 ]; then
+                    echo -e "❌ \033[38;5;196m错误：指令不可用，无法自动运行。请核对后再试。\033[0m"
                 else
                     echo -e "🚀 \033[38;5;76m[安全自动执行模式] 正在运行指令...\033[0m"
                     CLICOLOR_FORCE=1 FORCE_COLOR=1 eval "$clean_cmd"
                     local exit_code=$?
-                    if [ $exit_code -ne 0 ]; then
-                        echo "⚠️ 命令执行失败，退出码: $exit_code"
+                    if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ]; then
+                        if [ $exit_code -eq 1 ]; then
+                            echo -e "💡 \033[38;5;244m提示：命令执行完毕，但未返回结果（退出码 1）。这在 lsof/grep 等命令中通常表示“未匹配到目标”。\033[0m"
+                        elif [ $exit_code -eq 127 ]; then
+                            echo -e "❌ \033[38;5;196m错误：命令找不到 (退出码 127)，请检查是否安装了该工具。\033[0m"
+                        else
+                            echo "⚠️ 命令执行失败，退出码: $exit_code"
+                        fi
                     fi
                 fi
             else
-                printf "执行？[Y/n/c] (Y:执行, n:取消, c:拷贝命令) "
+                local prompt_text="执行？[Y/n/c]"
+                [ $cmd_exists -eq 0 ] && prompt_text="⚠️ 指令可能无效，仍尝试执行？[y/N/c]"
+                
+                printf "%s (Y:执行, n:取消, c:拷贝命令) " "$prompt_text"
                 read -r confirm
                 
+                # 如果命令可能无效，默认改为不执行 (回车即 n)
+                if [ $cmd_exists -eq 0 ]; then
+                    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                        confirm="n"
+                    fi
+                fi
+
                 if [ -z "$confirm" ] || [[ "$confirm" =~ ^[Yy]$ ]]; then
                     CLICOLOR_FORCE=1 FORCE_COLOR=1 eval "$clean_cmd"
                     local exit_code=$?
-                    if [ $exit_code -ne 0 ]; then
-                        echo "⚠️ 命令执行失败，退出码: $exit_code"
+                    if [ $exit_code -ne 0 ] && [ $exit_code -ne 130 ]; then
+                        if [ $exit_code -eq 1 ]; then
+                            echo -e "💡 \033[38;5;244m提示：命令执行完毕，但未返回结果（退出码 1）。这在 lsof/grep 等命令中通常表示“未匹配到目标”。\033[0m"
+                        elif [ $exit_code -eq 127 ]; then
+                            echo -e "❌ \033[38;5;196m错误：命令找不到 (退出码 127)，请检查是否安装了该工具。\033[0m"
+                        else
+                            echo "⚠️ 命令执行失败，退出码: $exit_code"
+                        fi
                     fi
                 elif [[ "$confirm" =~ ^[Cc]$ ]]; then
                     # 兼容 macOS 剪贴板工具 pbcopy
@@ -882,6 +936,13 @@ ${clean_advice:-无}"
 
         # 记录历史日志
         echo "$(date '+%Y-%m-%d %H:%M:%S') | $prompt | $clean_cmd" >> "$HIST_FILE" || return 1
+        
+        # 历史记录自动精简（保留最近 1000 条）
+        if [ $((RANDOM % 20)) -eq 0 ]; then
+            local tail_hist
+            tail_hist=$(tail -n 1000 "$HIST_FILE" 2>/dev/null)
+            echo "$tail_hist" > "$HIST_FILE"
+        fi
 
         # 查询完毕后，前台轻量非侵入式展示升级提示（有新版本时才显示一行，无则完全静默）
         show_upgrade_notification
@@ -891,6 +952,18 @@ ${clean_advice:-无}"
         echo ""
         show_upgrade_notification
     fi
+}
+
+# 显示调试日志
+cmd_debug() {
+    load_config || return 1
+    if [ ! -s "$DEBUG_FILE" ]; then
+        echo "暂无调试日志。"
+        return 0
+    fi
+    local lines="${1:-20}"
+    echo "====== 最近的 ShellAI 调试日志 (展示最后 $lines 行) ======"
+    tail -n "$lines" "$DEBUG_FILE"
 }
 
 # 帮助菜单
@@ -904,7 +977,9 @@ cmd_help() {
   status        查看当前配置
   model <id>    切换并验证模型（永久保存）
   auto [on/off] 🚀 开启/关闭无危险安全命令的直接自动执行
+  silent [on/off] 🔕 开启/关闭终端启动时的载入提示
   analyze       🛡️  AI 深度安全审计评估历史命令
+  debug [lines] 🔍 查看调试日志（默认 20 行）
   clear/reset   🧹 清空 AI 上下文记忆
   history       查看历史
   upgrade       🚀 一键在线自适应检测并升级更新 ShellAI 核心脚本
@@ -946,6 +1021,24 @@ run_main() {
                 echo "  ai auto off   - 关闭自动执行，全部命令需手动确认"
             fi
             ;;
+        silent)
+            if [ "${2:-}" = "on" ] || [ "${2:-}" = "true" ]; then
+                SILENT_LOAD="true"
+                save_config
+                echo "🔕 ShellAI 已开启【静默加载】模式，终端启动时将不再打印载入提示。"
+            elif [ "${2:-}" = "off" ] || [ "${2:-}" = "false" ]; then
+                SILENT_LOAD="false"
+                save_config
+                echo "🔔 ShellAI 已关闭【静默加载】模式，终端启动时将恢复打印载入提示。"
+            else
+                load_config || return 1
+                echo "当前静默加载模式：${SILENT_LOAD:-false}"
+                echo "用法："
+                echo "  ai silent on    - 开启静默加载，隐藏启动提示"
+                echo "  ai silent off   - 关闭静默加载，显示启动提示"
+            fi
+            ;;
+        debug) cmd_debug "$2" ;;
         history)
             if [ -n "${2:-}" ]; then
                 cmd_history_replay "$2"
@@ -1010,7 +1103,10 @@ if [ $is_sourced -eq 1 ]; then
         return $? 2>/dev/null || true
     else
         # 如果仅是一次性无参数初始化载入，定义并注册 ai 函数后打印提示优雅返回，不运行任何命令
-        echo "✅ ShellAI 已载入当前终端会话！现在您可直接输入 ai 命令进行智能查询。"
+        load_config >/dev/null 2>&1
+        if [ "${SILENT_LOAD:-false}" != "true" ]; then
+            echo "✅ ShellAI 已载入当前终端会话！现在您可直接输入 ai 命令进行智能查询。"
+        fi
         return 0 2>/dev/null || true
     fi
 else
