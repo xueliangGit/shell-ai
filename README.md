@@ -16,7 +16,7 @@ graph TD
     A[用户输入: ai 查看端口占用] --> B{Zsh/Bash 热插拔函数}
     B -->|Zsh noglob 免引号拦截| C[动态组装环境上下文]
     C -->|注入 OS/Shell/当前工作目录/文件列表| D[调用 OpenRouter LLM]
-    D -->|异步 Loading 思考动画| E{解析 [COMMAND] 与 [ADVICE]}
+    D -->|异步 Loading 思考动画| E{"解析 [COMMAND] 与 [ADVICE]"}
     E -->|1. 敏感词/黑名单校验| F{安全校验系统}
     F -->|判定高危: rm -rf, mkfs, dd...| G[🛡️ 阻断一键执行 / 仅允许安全复制]
     F -->|判定安全| H{AUTO_RUN 自动执行判定}
