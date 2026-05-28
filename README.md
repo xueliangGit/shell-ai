@@ -55,34 +55,58 @@ graph TD
 
 ## 🛠️ 安装与快速配置
 
-### 第一步：克隆/下载并赋权
-在你的仓库目录下直接运行（或拷贝 `ai.sh` 到你方便的目录）：
+### 🚀 方式一：极速一键安装（推荐）
+直接复制并运行以下一行命令，即可全自动完成**核心脚本下载**、**系统全局别名部署**与**终端自启静默载入**：
+
 ```bash
-# 赋予可执行权限
-chmod +x ./ai.sh
+# 使用 curl 一键无缝安装
+curl -fsSL https://raw.githubusercontent.com/xueliangGit/shell-ai/main/ai.sh -o ~/.ai.sh && chmod +x ~/.ai.sh && ~/.ai.sh install
 ```
 
-### 第二步：一键部署为全局命令
-我们贴心地内置了一键全局部署命令，在终端中直接运行：
-```bash
-./ai.sh install
-```
-> **💡 它会为你做什么？**
-> 1. 将脚本创建软链接至 `~/.local/bin/ai`（自动注册为全局 `ai` 指令）。
-> 2. 智能探测你的 Shell 类型（Zsh 或 Bash），并自动在 `~/.zshrc` 或 `~/.bash_profile` 底部安全追加静默载入指令，实现开机自启，**新打开任何终端窗口即可免配置直接输入 `ai`！**
+或者（如果您的环境没有安装 `curl`）：
 
-### 第三步：配置 API 密钥
-首次运行或输入 `ai config` 启动高颜值命令行配置向导：
+```bash
+# 使用 wget 一键安装
+wget -qO ~/.ai.sh https://raw.githubusercontent.com/xueliangGit/shell-ai/main/ai.sh && chmod +x ~/.ai.sh && ~/.ai.sh install
+```
+
+> **💡 一键安装会为您自动做些什么？**
+> 1. 下载 `ai.sh` 核心控制脚本并安全静默保存在您的家目录下（即 `~/.ai.sh`）。
+> 2. 创建极速全局软链接 `~/.local/bin/ai`，将 `ai` 注册为系统全局命令。
+> 3. 自动识别您的终端环境（Zsh 或 Bash），在 `~/.zshrc` 或 `~/.bash_profile` 末尾追加初始化逻辑，**此后您新开任意终端即可直接使用 `ai` 命令！**
+
+---
+
+### 📦 方式二：手动克隆与本地开发部署（备选）
+如果您需要对源码进行修改或本地调试开发，请采用以下步骤：
+
+1. **克隆项目并移动**：
+   ```bash
+   git clone git@github.com:xueliangGit/shell-ai.git
+   cd shell-ai
+   # 移动到家目录以完美对齐内置全局软链接路径
+   cp ai.sh ~/.ai.sh && chmod +x ~/.ai.sh
+   ```
+
+2. **本地执行安装**：
+   ```bash
+   ~/.ai.sh install
+   ```
+
+---
+
+### 🔑 首次激活：配置 API 密钥
+在您完成上述任意一种安装后，在终端中直接运行以下命令，即可启动高颜值命令行配置向导：
 ```bash
 ai config
 ```
-按照提示输入你的 OpenRouter Key（支持切换任意大模型，包含免费或低成本模型），验证通过后即可永久启用！
+按照提示输入您的 OpenRouter Key（支持切换任意大模型，包含免费或极低成本模型），验证通过后即可永久启用！
 
 ---
 
 ## 📖 极客命令指南
 
-除了直接输入中文需求外，`ShellAI` 还支持以下极客管理指令：
+除了直接输入自然语言进行查询外，`ShellAI` 还配备了一套优雅、功能齐备的极客命令行管理指令集：
 
 | 指令 | 作用 | 示例 |
 | :--- | :--- | :--- |
