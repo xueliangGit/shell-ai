@@ -3,6 +3,9 @@
 # ShellAI - 极简、安全且 100% 兼容 source 载入的单次命令查询助手
 # -----------------------------------------------------------------
 
+# 版本定义
+VERSION="1.0.0"
+
 # 可配置区
 CONF_DIR="$HOME/.shell_ai"
 CONF_FILE="$CONF_DIR/config"
@@ -43,6 +46,8 @@ MODEL="$DEFAULT_MODEL"
 TEMPERATURE="$DEFAULT_TEMP"
 MAX_TOKENS="$DEFAULT_MAX_TOKENS"
 AUTO_RUN="$DEFAULT_AUTO_RUN"
+LAST_CHECK_TIME="0"
+REMOTE_VERSION_CACHE=""
 EOF
         # shellcheck source=/dev/null
         source "$CONF_FILE" || return 1
@@ -58,6 +63,8 @@ MODEL="$MODEL"
 TEMPERATURE="$TEMPERATURE"
 MAX_TOKENS="$MAX_TOKENS"
 AUTO_RUN="$AUTO_RUN"
+LAST_CHECK_TIME="${LAST_CHECK_TIME:-0}"
+REMOTE_VERSION_CACHE="${REMOTE_VERSION_CACHE:-}"
 EOF
 }
 
@@ -304,6 +311,104 @@ cmd_status() {
     echo "AutoRun: ${AUTO_RUN:-false}"
 }
 
+# 显示版本信息
+cmd_version() {
+    echo -e "🛡️  ${C_BOLD}ShellAI${C_RESET} 版本: ${C_GREEN}v$VERSION${C_RESET}"
+}
+
+# 在线检查与一键升级
+cmd_upgrade() {
+    echo "🔍 正在检测云端最新版本..."
+    local remote_url="https://raw.githubusercontent.com/xueliangGit/shell-ai/main/ai.sh"
+    
+    # 异步拉取云端头部 30 行，闪电定位 VERSION 变量
+    local remote_version
+    remote_version=$(curl -s --connect-timeout 8 --max-time 12 "$remote_url" | head -n 30 | grep "^VERSION=" | cut -d'"' -f2 || echo "")
+    
+    if [ -z "$remote_version" ]; then
+        echo -e "${C_RED}❌ 无法获取云端版本信息，请检查您的网络连接或代理设置。${C_RESET}"
+        return 1
+    fi
+    
+    if [ "$remote_version" = "$VERSION" ]; then
+        echo -e "✅ 恭喜！您当前已是最新版本 (${C_GREEN}v$VERSION${C_RESET})。"
+        return 0
+    fi
+    
+    echo -e "🔔 发现新版本：${C_YELLOW}v$remote_version${C_RESET} (当前本地版本: v$VERSION)"
+    printf "是否执行一键在线升级？[Y/n] "
+    read -r confirm
+    
+    if [ -z "$confirm" ] || [[ "$confirm" =~ ^[Yy]$ ]]; then
+        echo "⏳ 正在拉取并覆盖升级..."
+        
+        # 兼容 Mac 和 Linux 的绝对路径寻址
+        local target_path="$HOME/.ai.sh"
+        if [ ! -f "$target_path" ]; then
+            # 兜底到正在运行的脚本绝对路径
+            if command -v realpath >/dev/null 2>&1; then
+                target_path=$(realpath "$0" 2>/dev/null || echo "$0")
+            else
+                # 兼容旧版 macOS 的物理寻址
+                local dir
+                dir=$(cd "$(dirname "$0")" && pwd)
+                target_path="$dir/$(basename "$0")"
+            fi
+        fi
+        
+        if curl -fsSL --connect-timeout 12 --max-time 25 "$remote_url" -o "$target_path"; then
+            chmod +x "$target_path"
+            echo -e "${C_GREEN}🎉 升级成功！当前版本已成功跃升至 v$remote_version！${C_RESET}"
+            echo "💡 提示：新打开一个终端窗口或执行 'source ~/.ai.sh' 即可立即享受全新特性！"
+        else
+            echo -e "${C_RED}❌ 升级失败，写入目标路径时发生异常。${C_RESET}"
+            return 1
+        fi
+    else
+        echo "❌ 已取消升级。"
+    fi
+}
+
+# 24小时无感后台异步版本检测（绝不阻塞前台响应）
+check_version_async() {
+    local current_time
+    current_time=$(date +%s 2>/dev/null || echo "0")
+    
+    # 距离上一次检查未满 24 小时 (86400秒)，则直接返回以节省网络与流量
+    local last_check=${LAST_CHECK_TIME:-0}
+    if [ "$current_time" -ne 0 ] && [ "$last_check" -ne 0 ]; then
+        local diff=$((current_time - last_check))
+        if [ $diff -lt 86400 ] && [ $diff -gt 0 ]; then
+            return 0
+        fi
+    fi
+    
+    # 后台异步执行静默检测，完全不拖慢日常查询速度
+    (
+        local remote_url="https://raw.githubusercontent.com/xueliangGit/shell-ai/main/ai.sh"
+        local remote_v
+        remote_v=$(curl -s --connect-timeout 4 --max-time 6 "$remote_url" | head -n 30 | grep "^VERSION=" | cut -d'"' -f2 || echo "")
+        
+        if [ -n "$remote_v" ]; then
+            # 极速将最新状态安全合并追加写入配置文件
+            if [ -f "$CONF_FILE" ]; then
+                local temp_conf="${CONF_FILE}.tmp"
+                grep -v "LAST_CHECK_TIME=" "$CONF_FILE" | grep -v "REMOTE_VERSION_CACHE=" > "$temp_conf" || true
+                echo "LAST_CHECK_TIME=\"$current_time\"" >> "$temp_conf"
+                echo "REMOTE_VERSION_CACHE=\"$remote_v\"" >> "$temp_conf"
+                mv "$temp_conf" "$CONF_FILE"
+            fi
+        fi
+    ) & >/dev/null 2>&1
+}
+
+# 智能版本升级友好提示
+show_upgrade_notification() {
+    if [ -n "${REMOTE_VERSION_CACHE:-}" ] && [ "$REMOTE_VERSION_CACHE" != "$VERSION" ]; then
+        echo -e "\n${C_YELLOW}💡 提示：ShellAI 发现全新版本 ${C_GREEN}v$REMOTE_VERSION_CACHE${C_RESET}${C_YELLOW}！输入 ${C_CYAN}ai upgrade${C_RESET}${C_YELLOW} 即可一键安全升级。${C_RESET}"
+    fi
+}
+
 # 切换模型
 cmd_model() {
     load_config || return 1
@@ -519,6 +624,9 @@ cmd_run() {
         echo "请输入问题，例如：ai 查看端口占用"
         return 1
     fi
+
+    # 后台异步触发版本检测（每24小时静默轮询一次，完全不阻塞本次查询）
+    check_version_async
 
     # 动态注入高精度环境上下文（OS、当前Shell、当前路径、以及当前目录下的前几项文件名）
     local current_os
@@ -761,10 +869,14 @@ ${clean_advice:-无}"
 
         # 记录历史日志
         echo "$(date '+%Y-%m-%d %H:%M:%S') | $prompt | $clean_cmd" >> "$HIST_FILE" || return 1
+
+        # 查询完毕后，前台轻量非侵入式展示升级提示（有新版本时才显示一行，无则完全静默）
+        show_upgrade_notification
     else
         # 闲聊/分析/问答模式：直接优雅地输出大模型的人话回复，不走任何命令执行和安全拦截，高情商结束！
         echo "$raw_content"
         echo ""
+        show_upgrade_notification
     fi
 }
 
@@ -782,6 +894,8 @@ cmd_help() {
   analyze       🛡️  AI 深度安全审计评估历史命令
   clear/reset   🧹 清空 AI 上下文记忆
   history       查看历史
+  upgrade       🚀 一键在线自适应检测并升级更新 ShellAI 核心脚本
+  version       🛡️ 查看本地已安装的 ShellAI 版本号
   help          本帮助
 
 直接输入问题即运行（支持基于上下文多轮对话，如 "刚才那个命令怎么改..."）：
@@ -831,6 +945,8 @@ run_main() {
             init_dir && echo "[]" > "$SESSION_FILE" && echo "🧹 已成功清除 AI 上下文记忆！"
             ;;
         install) cmd_install ;;
+        upgrade|update) cmd_upgrade ;;
+        version|-v|--version) cmd_version ;;
         help) cmd_help ;;
         *) cmd_run "$*" ;;
     esac
