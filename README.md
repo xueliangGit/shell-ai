@@ -119,6 +119,7 @@ ai config
 | `ai history <序号>` | **一键复用**：提取对应序号的历史命令，支持重新运行或拷贝 | `ai history 3` |
 | `ai analyze` | 🛡️ **终端深度审计**：调遣 AI 安全专家深度审计你最近的终端历史指令 | `ai analyze` |
 | `ai clear` / `reset` | 🧹 一键清空多轮对话的上下文记忆，开启全新的话题 | `ai clear` |
+| `ai uninstall` | 🧹 **彻底卸载**：全自动清理别名、自启动载入与配置，恢复纯净系统 | `ai uninstall` |
 | `ai help` | 显示极其精美的本地帮助控制台 | `ai help` |
 
 ---

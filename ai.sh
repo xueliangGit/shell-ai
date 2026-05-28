@@ -295,6 +295,104 @@ cmd_install() {
     echo "=================================================="
 }
 
+# 彻底卸载清理 ShellAI 全局软链接、自动载入与配置环境
+cmd_uninstall() {
+    local bin_dir="$HOME/.local/bin"
+    local bin_path="$bin_dir/ai"
+    local config_dir="$HOME/.shell_ai"
+
+    # 动态获取当前脚本的绝对路径
+    local script_source
+    if command -v realpath >/dev/null 2>&1; then
+        script_source=$(realpath "$0")
+    else
+        script_source="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    fi
+
+    echo "====== 正在卸载 ShellAI ======"
+    echo "   卸载脚本路径：$script_source"
+
+    # 1. 移除全局软链接
+    if [ -L "$bin_path" ] || [ -f "$bin_path" ]; then
+        rm -f "$bin_path"
+        echo "✅ 已成功移除全局全局软链接：$bin_path"
+    else
+        echo "ℹ️ 全局软链接未找到或已清理"
+    fi
+
+    # 2. 从终端配置文件（Zsh/Bash）中清理自动载入配置
+    local rc_files=("$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc")
+    for rc in "${rc_files[@]}"; do
+        if [ -f "$rc" ]; then
+            # 如果 rc 文件包含 ShellAI 特征字样或脚本源路径
+            if grep -q "ShellAI" "$rc" || { [ -n "$script_source" ] && grep -q "$script_source" "$rc"; }; then
+                # 【安全与纯净双重防线】：创建临时物理备份，仅供写入中途异常回滚或熔断使用
+                local bak_file="${rc}.bak_tmp"
+                cp "$rc" "$bak_file" 2>/dev/null
+
+                local tmp_file
+                tmp_file=$(mktemp)
+                
+                # 极其稳妥的过滤：过滤包含 "ShellAI" 的行。
+                # 只有当 script_source 非空且不为 "/" 时，才参与二次排除过滤，防止因空串匹配清空整个文件！
+                if [ -n "$script_source" ] && [ "$script_source" != "/" ]; then
+                    grep -v "ShellAI 自动终端会话初始化载入" "$rc" | grep -v "$script_source" > "$tmp_file"
+                else
+                    grep -v "ShellAI 自动终端会话初始化载入" "$rc" | grep -v "ai\.sh" > "$tmp_file"
+                fi
+                
+                # 终极主动熔断防御：判断 tmp_file 行数
+                local original_lines
+                original_lines=$(wc -l < "$rc" 2>/dev/null || echo 0)
+                local new_lines
+                new_lines=$(wc -l < "$tmp_file" 2>/dev/null || echo 0)
+                
+                # 如果过滤前有较多内容（比如超过 3 行），但过滤后行数竟然变成了 0
+                # 触发熔断保护，绝对阻止覆写，并将临时备份转化为时间戳持久备份供用户手动查验
+                if [ "$original_lines" -gt 3 ] && [ "$new_lines" -eq 0 ]; then
+                    echo "⚠️ [熔断保护] 检测到 $rc 的清理后行数突变为 0！已成功阻断覆写，保护您的原始配置！"
+                    local emergency_bak="${rc}.bak_$(date '+%Y%m%d_%H%M%S')"
+                    [ -f "$bak_file" ] && mv "$bak_file" "$emergency_bak" && echo "💾 原始配置文件已安全转存至：$emergency_bak"
+                    rm -f "$tmp_file"
+                else
+                    cat "$tmp_file" > "$rc"
+                    rm -f "$tmp_file"
+                    # 顺利卸载完工：销毁临时备份，保证 0 垃圾残留，绝不给您的系统留下任何无用痕迹！
+                    rm -f "$bak_file"
+                    echo "✅ 已从 $rc 中安全清理自动载入配置。"
+                fi
+            fi
+        fi
+    done
+
+    # 3. 交互式确认是否清空配置和历史记录
+    echo ""
+    printf "❓ 是否删除配置目录与历史会话记录 (~/.shell_ai)？[y/N]: "
+    read -r clean_config
+    if [[ "$clean_config" =~ ^[Yy]$ ]]; then
+        rm -rf "$config_dir"
+        echo "✅ 已清空配置与历史记录目录：$config_dir"
+    else
+        echo "ℹ️ 已保留配置与历史记录目录（内含您的 API 密钥与多轮历史）。"
+    fi
+
+    # 4. 交互式确认是否删除主脚本本身（若是 ~/.ai.sh）
+    if [ "$script_source" = "$HOME/.ai.sh" ]; then
+        echo ""
+        printf "❓ 检测到主脚本文件保存在 ~/.ai.sh，是否将其删除？[y/N]: "
+        read -r del_self
+        if [[ "$del_self" =~ ^[Yy]$ ]]; then
+            rm -f "$script_source"
+            echo "✅ ~/.ai.sh 脚本已删除。"
+        fi
+    fi
+
+    echo ""
+    echo "🎉 ShellAI 卸载完成！"
+    echo "💡 提示：如需彻底在当前会话生效，请执行：unalias ai 2>/dev/null"
+    echo "================================"
+}
+
 # 配置向导
 cmd_config() {
     load_config || return 1
@@ -973,6 +1071,7 @@ cmd_help() {
 
 命令：
   install       一键部署 ai 为系统全局命令
+  uninstall     🧹 彻底卸载并清理 ShellAI 所有的别名与配置现场
   config        配置 Key/URL/Model/参数（必填首次）
   status        查看当前配置
   model <id>    切换并验证模型（永久保存）
@@ -1051,6 +1150,7 @@ run_main() {
             init_dir && echo "[]" > "$SESSION_FILE" && echo "🧹 已成功清除 AI 上下文记忆！"
             ;;
         install) cmd_install ;;
+        uninstall) cmd_uninstall ;;
         upgrade|update) cmd_upgrade ;;
         version|-v|--version) cmd_version ;;
         help) cmd_help ;;
