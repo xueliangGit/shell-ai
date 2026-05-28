@@ -6,6 +6,10 @@
 # 版本定义
 VERSION="1.0.0"
 
+# 补全执行环境 PATH（修复通过软链接独立执行时 eval 找不到系统命令的 127 问题）
+# 将所有常见工具路径（含 Homebrew/macOS/Linux 标准路径）一次性合并注入
+export PATH="$PATH:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin:/opt/homebrew/opt/coreutils/libexec/gnubin"
+
 # 可配置区
 CONF_DIR="$HOME/.shell_ai"
 CONF_FILE="$CONF_DIR/config"
